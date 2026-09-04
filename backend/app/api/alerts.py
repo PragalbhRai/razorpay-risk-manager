@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.auth.api_key import get_current_merchant
 from app.models.alert import AlertModel
 from app.models.decision import DecisionModel
+from app.models.merchant import MerchantModel
 
 
 router = APIRouter(
@@ -63,6 +65,7 @@ def serialize_alert(alert, decision):
 
 def get_alert_with_decision(
     alert_id: str,
+    merchant_id,
     db: Session,
 ):
     try:
@@ -84,7 +87,8 @@ def get_alert_with_decision(
             AlertModel.decision_id == DecisionModel.id,
         )
         .filter(
-            AlertModel.id == alert_uuid
+            AlertModel.id == alert_uuid,
+            AlertModel.merchant_id == merchant_id,
         )
         .first()
     )
@@ -125,6 +129,7 @@ def list_alerts(
         ge=0,
     ),
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Return fraud alerts with their associated risk decisions.
@@ -181,9 +186,18 @@ def list_alerts(
                 detail="merchant_id must be a valid UUID",
             )
 
+        if merchant_uuid != merchant.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Merchant filter does not match API key",
+            )
+
         query = query.filter(
             AlertModel.merchant_id == merchant_uuid
         )
+
+    else:
+        query = query.filter(AlertModel.merchant_id == merchant.id)
 
     # ---------------------------------------------------------
     # Newest alerts first
@@ -223,6 +237,7 @@ def list_alerts(
 def get_alert(
     alert_id: str,
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Return one alert with its associated risk decision.
@@ -230,6 +245,7 @@ def get_alert(
 
     alert, decision = get_alert_with_decision(
         alert_id,
+        merchant.id,
         db,
     )
 
@@ -247,6 +263,7 @@ def get_alert(
 def acknowledge_alert(
     alert_id: str,
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Mark an open alert as acknowledged.
@@ -254,6 +271,7 @@ def acknowledge_alert(
 
     alert, decision = get_alert_with_decision(
         alert_id,
+        merchant.id,
         db,
     )
 
@@ -306,6 +324,7 @@ def acknowledge_alert(
 def resolve_alert(
     alert_id: str,
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Resolve an acknowledged alert.
@@ -313,6 +332,7 @@ def resolve_alert(
 
     alert, decision = get_alert_with_decision(
         alert_id,
+        merchant.id,
         db,
     )
 

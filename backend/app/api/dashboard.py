@@ -5,11 +5,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.auth.api_key import get_current_merchant
 from app.models.alert import AlertModel
 from app.models.decision import DecisionModel
 from app.models.merchant import MerchantModel
 from app.models.transaction import TransactionModel
 from app.models.window import WindowModel
+from app.models.merchant import MerchantModel
 
 
 router = APIRouter(
@@ -29,12 +31,13 @@ def dashboard_summary(
         description="Optional merchant UUID filter",
     ),
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Return high-level fraud-risk metrics for the dashboard.
     """
 
-    merchant_uuid = None
+    merchant_uuid = merchant.id
 
     if merchant_id:
         try:
@@ -43,6 +46,12 @@ def dashboard_summary(
             raise HTTPException(
                 status_code=422,
                 detail="merchant_id must be a valid UUID",
+            )
+
+        if merchant_uuid != merchant.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Merchant filter does not match API key",
             )
 
     # -----------------------------------------------------
@@ -176,12 +185,13 @@ def dashboard_timeline(
         le=200,
     ),
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Return recent risk windows for charts and timeline views.
     """
 
-    merchant_uuid = None
+    merchant_uuid = merchant.id
 
     if merchant_id:
         try:
@@ -190,6 +200,12 @@ def dashboard_timeline(
             raise HTTPException(
                 status_code=422,
                 detail="merchant_id must be a valid UUID",
+            )
+
+        if merchant_uuid != merchant.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Merchant filter does not match API key",
             )
 
     query = (
@@ -275,6 +291,7 @@ def dashboard_timeline(
 def merchant_dashboard(
     merchant_id: str,
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     """
     Return dashboard information for one merchant.
@@ -286,6 +303,12 @@ def merchant_dashboard(
         raise HTTPException(
             status_code=422,
             detail="merchant_id must be a valid UUID",
+        )
+
+    if merchant_uuid != merchant.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Merchant does not match API key",
         )
 
     merchant = (
@@ -305,6 +328,7 @@ def merchant_dashboard(
     summary = dashboard_summary(
         merchant_id=merchant_id,
         db=db,
+        merchant=merchant,
     )
 
     recent_alerts = (

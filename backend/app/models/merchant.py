@@ -26,6 +26,12 @@ class MerchantModel(Base):
         nullable=False,
     )
 
+    api_key_hash = Column(
+        String(64),
+        unique=True,
+        nullable=True,
+    )
+
     baseline_tx_count = Column(
         Float,
         nullable=True,

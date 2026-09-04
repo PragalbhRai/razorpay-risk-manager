@@ -17,11 +17,17 @@ const MERCHANT_ID = "123e4567-e89b-12d3-a456-426614174000";
 const REFRESH_INTERVAL_MS = 7000;
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const apiKey = import.meta.env.VITE_API_KEY;
 
 async function apiRequest(path, options = {}) {
+  if (!apiKey) {
+    throw new Error("VITE_API_KEY is not configured");
+  }
+
   const response = await fetch(`${apiBaseUrl}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      "X-API-Key": apiKey,
       ...options.headers,
     },
     ...options,

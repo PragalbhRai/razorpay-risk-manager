@@ -5,7 +5,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.auth.api_key import get_current_merchant
 from app.schemas.transaction import TransactionCreate
+from app.models.merchant import MerchantModel
 from app.models.transaction import TransactionModel
 from app.streaming.redis_client import redis_client
 
@@ -22,6 +24,7 @@ TRANSACTION_STREAM = "transactions"
 def ingest_transaction(
     tx_in: TransactionCreate,
     db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
 ):
     # ---------------------------------------------------------
     # Validate UUID fields
@@ -38,6 +41,12 @@ def ingest_transaction(
                 "transaction_id and merchant_id "
                 "must be valid UUIDs"
             ),
+        )
+
+    if merchant_uuid != merchant.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Transaction merchant does not match API key",
         )
 
     # ---------------------------------------------------------

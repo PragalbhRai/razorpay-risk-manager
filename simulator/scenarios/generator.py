@@ -164,13 +164,18 @@ def generate_transactions(merchant_id, scenario, anchor, rng):
             }
 
 
-def send_transaction(api_url, transaction, timeout):
+def send_transaction(api_url, transaction, api_key, timeout):
     payload = {
         key: value
         for key, value in transaction.items()
         if key != "ground_truth"
     }
-    response = requests.post(api_url, json=payload, timeout=timeout)
+    response = requests.post(
+        api_url,
+        json=payload,
+        headers={"X-API-Key": api_key},
+        timeout=timeout,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -192,6 +197,11 @@ def parse_args():
     parser.add_argument(
         "--api-url",
         default=os.getenv("RISK_API_URL", DEFAULT_API_URL),
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("SIMULATOR_API_KEY"),
+        help="Merchant API key; defaults to SIMULATOR_API_KEY.",
     )
     parser.add_argument("--seed", type=int, default=20260905)
     parser.add_argument(
@@ -226,13 +236,18 @@ def main():
         print(f"Generated {len(transactions)} transactions in {args.output}")
         return
 
+    if not args.api_key:
+        raise SystemExit(
+            "SIMULATOR_API_KEY is required when sending transactions"
+        )
+
     print(
         f"Sending {len(transactions)} {args.scenario} transactions "
         f"for {len(merchant_ids)} merchant(s)...",
         flush=True,
     )
     for index, transaction in enumerate(transactions, start=1):
-        send_transaction(args.api_url, transaction, args.timeout)
+        send_transaction(args.api_url, transaction, args.api_key, args.timeout)
         if index == 1 or index == len(transactions) or index % 25 == 0:
             print(f"Accepted {index}/{len(transactions)}", flush=True)
         if args.sleep:
