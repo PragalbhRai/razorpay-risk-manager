@@ -1,43 +1,137 @@
-import random
-import time
+﻿import time
+import uuid
+from datetime import datetime, timedelta, timezone
+
 import requests
-from datetime import datetime, timezone
+
 
 API_URL = "http://localhost:8000/api/v1/transactions"
 
-MERCHANT_IDS = ["mer_val_101", "mer_lux_202", "mer_elec_303", "mer_Apparel_404"]
-CUSTOMER_EMAILS = ["test.user1@gmail.com", "fraudster99@riskmail.io", "priya.sharma@yahoo.com", "alex.smith@outlook.com"]
-PAYMENT_METHODS = ["upi", "card", "netbanking", "wallet"]
-CURRENCIES = ["INR", "USD"]
+MERCHANT_ID = "123e4567-e89b-12d3-a456-426614174000"
 
-def generate_random_transaction():
-    is_suspicious = random.random() < 0.15
-    amount = round(random.uniform(500.0, 150000.0), 2) if is_suspicious else round(random.uniform(100.0, 5000.0), 2)
-    
+PAYMENT_METHODS = [
+    "upi",
+    "card",
+    "netbanking",
+    "wallet",
+]
+
+
+def send_transaction(
+    occurred_at,
+    amount,
+    payment_method_type,
+    status,
+):
     payload = {
-        "transaction_id": f"txn_{random.randint(10000000, 99999999)}",
-        "merchant_id": random.choice(MERCHANT_IDS),
-        "customer_email": random.choice(CUSTOMER_EMAILS),
+        "transaction_id": str(uuid.uuid4()),
+        "merchant_id": MERCHANT_ID,
+        "razorpay_event_id": f"evt_{uuid.uuid4()}",
+        "razorpay_payment_id": f"pay_{uuid.uuid4()}",
         "amount": amount,
-        "currency": "INR",
-        "payment_method": random.choice(PAYMENT_METHODS),
-        "ip_address": f"192.168.{random.randint(0, 255)}.{random.randint(0, 255)}",
-        "device_fingerprint": f"dev_fp_{random.randint(1000, 9999)}",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "payment_method_type": payment_method_type,
+        "payment_method_ref_hash": None,
+        "status": status,
+        "occurred_at": occurred_at.isoformat(),
     }
-    return payload
+
+    response = requests.post(
+        API_URL,
+        json=payload,
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    print(
+        f"{status:7} | "
+        f"{payment_method_type:10} | "
+        f"₹{amount:8.2f} | "
+        f"{occurred_at.isoformat()} | "
+        f"{response.json()}",
+        flush=True,
+    )
+
+
+def run_controlled_scenario():
+    now = datetime.now(timezone.utc)
+
+    # Align to an exact 5-minute boundary.
+    anchor = now.replace(
+        second=0,
+        microsecond=0,
+    )
+
+    anchor -= timedelta(
+        minutes=anchor.minute % 5
+    )
+
+    # ---------------------------------------------------------
+    # NORMAL BASELINE
+    # 8 historical 5-minute windows.
+    # Each contains exactly 1 successful transaction.
+    # ---------------------------------------------------------
+
+    print("\n=== BASELINE PHASE ===\n")
+
+    baseline_start = anchor - timedelta(
+        minutes=45
+    )
+
+    for i in range(8):
+        window_start = (
+            baseline_start
+            + timedelta(minutes=i * 5)
+        )
+
+        occurred_at = (
+            window_start
+            + timedelta(seconds=30)
+        )
+
+        send_transaction(
+            occurred_at=occurred_at,
+            amount=1000.0,
+            payment_method_type="upi",
+            status="SUCCESS",
+        )
+
+        time.sleep(0.2)
+
+    # ---------------------------------------------------------
+    # FRAUD SPIKE
+    # 12 failed transactions inside ONE 5-minute window.
+    # Uses 4 payment methods and high volume.
+    # ---------------------------------------------------------
+
+    print("\n=== FRAUD SPIKE PHASE ===\n")
+
+    fraud_start = (
+        baseline_start
+        + timedelta(minutes=40)
+    )
+
+    for i in range(12):
+        occurred_at = (
+            fraud_start
+            + timedelta(seconds=10 + i * 3)
+        )
+
+        send_transaction(
+            occurred_at=occurred_at,
+            amount=100.0,
+            payment_method_type=(
+                PAYMENT_METHODS[
+                    i % len(PAYMENT_METHODS)
+                ]
+            ),
+            status="FAILED",
+        )
+
+        time.sleep(0.2)
+
+    print("\n=== SCENARIO COMPLETE ===\n")
+
 
 if __name__ == "__main__":
-    print("Starting Live Transaction Ingestion Stream... Press Ctrl+C to stop.")
-    while True:
-        tx = generate_random_transaction()
-        try:
-            response = requests.post(API_URL, json=tx)
-            if response.status_code == 201:
-                print(f"Successfully ingested: {tx['transaction_id']} | Amount: {tx['amount']} INR | Status: {response.json().get('risk_status')}")
-            else:
-                print(f"Failed to ingest {tx['transaction_id']}: {response.text}")
-        except Exception as e:
-            print(f"Connection error: {e}")
-        
-        time.sleep(2.0)
+    run_controlled_scenario()

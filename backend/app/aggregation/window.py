@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from statistics import mean, pstdev
 
-
 WINDOW_MINUTES = 5
 
 FAILED_STATUSES = {
@@ -25,15 +24,6 @@ def normalize_datetime(value):
 
 
 def get_window_start(timestamp):
-    """
-    Return the deterministic 5-minute bucket containing
-    the supplied timestamp.
-
-    Example:
-        14:03:21 -> 14:00:00
-        14:07:42 -> 14:05:00
-    """
-
     timestamp = normalize_datetime(timestamp)
 
     minute = (
@@ -49,12 +39,9 @@ def get_window_start(timestamp):
 
 
 def build_window(transactions, window_start):
-    """
-    Build deterministic 5-minute window statistics from
-    a collection of transaction records.
-    """
-
-    window_start = normalize_datetime(window_start)
+    window_start = normalize_datetime(
+        window_start
+    )
 
     window_end = (
         window_start
@@ -65,9 +52,15 @@ def build_window(transactions, window_start):
         tx
         for tx in transactions
         if (
-            normalize_datetime(tx["occurred_at"])
+            normalize_datetime(
+                tx["occurred_at"]
+            )
             >= window_start
-            and normalize_datetime(tx["occurred_at"])
+        )
+        and (
+            normalize_datetime(
+                tx["occurred_at"]
+            )
             < window_end
         )
     ]
@@ -91,7 +84,8 @@ def build_window(transactions, window_start):
     failed_count = sum(
         1
         for tx in transactions
-        if tx["status"].upper() in FAILED_STATUSES
+        if tx["status"].upper()
+        in FAILED_STATUSES
     )
 
     tx_count = len(transactions)
@@ -106,7 +100,9 @@ def build_window(transactions, window_start):
                 for tx in transactions
             }
         ),
-        "failure_rate": failed_count / tx_count,
+        "failure_rate": (
+            failed_count / tx_count
+        ),
         "amount_mean": mean(amounts),
         "amount_stddev": (
             pstdev(amounts)

@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+from datetime import timedelta
 
 import redis
 
@@ -26,6 +27,8 @@ REDIS_URL = os.getenv(
 STREAM_NAME = "transactions"
 CONSUMER_GROUP = "risk-workers"
 CONSUMER_NAME = "risk-worker-1"
+
+BASELINE_WINDOW_COUNT = 20
 
 
 redis_client = redis.Redis.from_url(
@@ -56,6 +59,59 @@ def ensure_consumer_group():
             raise
 
 
+def get_merchant_baseline(
+    db,
+    merchant_id,
+    current_window_start,
+):
+    """
+    Calculate the merchant's historical baseline.
+
+    Only windows BEFORE the current window are considered.
+
+    The most recent BASELINE_WINDOW_COUNT windows are used.
+    """
+
+    historical_windows = (
+        db.query(WindowModel)
+        .filter(
+            WindowModel.merchant_id == merchant_id,
+            WindowModel.window_start
+            < current_window_start,
+        )
+        .order_by(
+            WindowModel.window_start.desc()
+        )
+        .limit(BASELINE_WINDOW_COUNT)
+        .all()
+    )
+
+    if not historical_windows:
+        return None, None, 0
+
+    baseline_tx_count = (
+        sum(
+            window.tx_count
+            for window in historical_windows
+        )
+        / len(historical_windows)
+    )
+
+    baseline_failure_rate = (
+        sum(
+            float(window.failure_rate)
+            for window in historical_windows
+        )
+        / len(historical_windows)
+    )
+
+    return (
+        baseline_tx_count,
+        baseline_failure_rate,
+        len(historical_windows),
+    )
+
+
 def build_window_from_database(
     db,
     merchant_id,
@@ -66,9 +122,6 @@ def build_window_from_database(
 
     Rebuild the complete deterministic 5-minute window
     from persisted transactions.
-
-    This makes worker restarts and Redis message recovery
-    deterministic.
     """
 
     window_start = get_window_start(
@@ -77,8 +130,7 @@ def build_window_from_database(
 
     window_end = (
         window_start
-        + __import__("datetime")
-        .timedelta(minutes=5)
+        + timedelta(minutes=5)
     )
 
     transactions = (
@@ -160,7 +212,7 @@ def process_transaction(
             )
 
         # -----------------------------------------------------
-        # Reconstruct complete window from PostgreSQL
+        # Reconstruct complete deterministic window
         # -----------------------------------------------------
 
         window = build_window_from_database(
@@ -185,19 +237,48 @@ def process_transaction(
         )
 
         # -----------------------------------------------------
+        # Historical merchant baseline
+        # -----------------------------------------------------
+
+        (
+            baseline_tx_count,
+            baseline_failure_rate,
+            baseline_window_count,
+        ) = get_merchant_baseline(
+            db,
+            merchant_id,
+            window["window_start"],
+        )
+
+        if baseline_tx_count is None:
+            print(
+                "Baseline | "
+                "No historical windows available.",
+                flush=True,
+            )
+
+        else:
+            print(
+                f"Baseline | "
+                f"windows={baseline_window_count} | "
+                f"avg_tx_count="
+                f"{baseline_tx_count:.2f} | "
+                f"avg_failure_rate="
+                f"{baseline_failure_rate:.2f}",
+                flush=True,
+            )
+
+        # -----------------------------------------------------
         # Risk evaluation
         # -----------------------------------------------------
 
-        decision, baseline_deviation_score = (
-            risk_engine.evaluate(
-                window,
-                baseline_tx_count=(
-                    merchant.baseline_tx_count
-                ),
-                baseline_failure_rate=(
-                    merchant.baseline_failure_rate
-                ),
-            )
+        (
+            decision,
+            baseline_deviation_score,
+        ) = risk_engine.evaluate(
+            window,
+            baseline_tx_count=baseline_tx_count,
+            baseline_failure_rate=baseline_failure_rate,
         )
 
         print(
@@ -282,9 +363,7 @@ def process_transaction(
             )
 
             db_window.distinct_method_count = (
-                window[
-                    "distinct_method_count"
-                ]
+                window["distinct_method_count"]
             )
 
             db_window.failure_rate = (
