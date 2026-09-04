@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -52,11 +53,18 @@ def load_ground_truth(path):
 
 
 def fetch_predictions(api_base_url, merchant_ids, limit, timeout):
+    api_key = os.getenv("SIMULATOR_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "SIMULATOR_API_KEY environment variable is required for evaluation"
+        )
+
     predictions = {}
     for merchant_id in merchant_ids:
         response = requests.get(
             f"{api_base_url.rstrip('/')}/api/v1/dashboard/timeline",
             params={"merchant_id": merchant_id, "limit": limit},
+            headers={"X-API-Key": api_key},
             timeout=timeout,
         )
         response.raise_for_status()

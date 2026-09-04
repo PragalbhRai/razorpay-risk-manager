@@ -13,7 +13,6 @@ import {
 } from "recharts";
 import "./styles.css";
 
-const MERCHANT_ID = "123e4567-e89b-12d3-a456-426614174000";
 const REFRESH_INTERVAL_MS = 7000;
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
@@ -48,10 +47,10 @@ async function apiRequest(path, options = {}) {
 }
 
 const dashboardApi = {
-  getSummary: () => apiRequest(`/api/v1/dashboard/summary?merchant_id=${MERCHANT_ID}`),
-  getTimeline: () => apiRequest(`/api/v1/dashboard/timeline?merchant_id=${MERCHANT_ID}&limit=50`),
-  getMerchant: () => apiRequest(`/api/v1/dashboard/merchants/${MERCHANT_ID}`),
-  getAlerts: () => apiRequest(`/api/v1/alerts?merchant_id=${MERCHANT_ID}&limit=20`),
+  getSummary: () => apiRequest("/api/v1/dashboard/summary"),
+  getTimeline: () => apiRequest("/api/v1/dashboard/timeline?limit=50"),
+  getMerchant: () => apiRequest("/api/v1/dashboard/merchants/me"),
+  getAlerts: () => apiRequest("/api/v1/alerts?limit=20"),
   acknowledgeAlert: (alertId) => apiRequest(`/api/v1/alerts/${alertId}/acknowledge`, { method: "PATCH" }),
   resolveAlert: (alertId) => apiRequest(`/api/v1/alerts/${alertId}/resolve`, { method: "PATCH" }),
 };
@@ -94,6 +93,30 @@ function statusLabel(value) {
 
 function statusClass(value) {
   return `status status-${(value || "unknown").toLowerCase()}`;
+}
+
+function riskTone(value) {
+  if (value === "alert") return "alert";
+  if (value === "watch") return "watch";
+  return "normal";
+}
+
+function indicatorLabels(explanation) {
+  if (!explanation) return [];
+  const labels = [
+    ["high transaction volume", "High volume"],
+    ["elevated transaction volume", "Elevated volume"],
+    ["transaction volume is at least 2x", "2x baseline volume"],
+    ["transaction volume is significantly above", "Above baseline volume"],
+    ["very high payment failure rate", "Very high failures"],
+    ["elevated payment failure rate", "Elevated failures"],
+    ["payment failure rate is significantly above", "Failure rate shift"],
+    ["payment failure rate is above", "Above baseline failures"],
+    ["unusual payment-method diversity", "Method diversity"],
+    ["multiple payment methods", "Multiple methods"],
+    ["high average transaction amount", "High average amount"],
+  ];
+  return labels.filter(([needle]) => explanation.includes(needle)).map(([, label]) => label);
 }
 
 function useDashboardData() {
@@ -216,6 +239,11 @@ function RiskTimeline({ timeline, selectedWindow, onSelectWindow }) {
   return (
     <div className="timeline-layout">
       <div className="chart-shell">
+        <div className="timeline-legend" aria-label="Risk classification legend">
+          <span><i className="legend-dot normal" />Normal</span>
+          <span><i className="legend-dot watch" />Watch</span>
+          <span><i className="legend-dot alert" />Alert</span>
+        </div>
         <ResponsiveContainer width="100%" height={285}>
           <LineChart data={chartData} margin={{ top: 18, right: 24, bottom: 8, left: 0 }} onClick={(state) => {
             if (state?.activePayload?.[0]?.payload) onSelectWindow(state.activePayload[0].payload);
@@ -288,12 +316,34 @@ function WindowDetails({ windowItem }) {
           <dt>Baseline Deviation</dt>
           <dd>{formatNumber(windowItem.baseline_deviation_score, 2)}</dd>
         </div>
+        <div>
+          <dt>Payment Methods</dt>
+          <dd>{formatNumber(windowItem.distinct_method_count)} distinct</dd>
+        </div>
       </dl>
+      <div className="indicator-block">
+        <div className="detail-label">Risk indicators</div>
+        <div className="indicator-list">
+          {[
+            ["Volume", `${formatNumber(windowItem.tx_count)} transactions`],
+            ["Failures", formatPercent(windowItem.failure_rate)],
+            ["Average amount", formatCurrency(windowItem.amount_mean)],
+            ["Method diversity", `${formatNumber(windowItem.distinct_method_count)} methods`],
+          ].map(([label, value]) => <span key={label}><b>{label}</b>{value}</span>)}
+        </div>
+      </div>
     </aside>
   );
 }
 
-function AlertPanel({ alerts, onAcknowledge, onResolve, busyAlertId }) {
+function findAlertWindow(alert, timeline) {
+  const eventTime = new Date(alert.created_at || alert.decision?.decided_at || 0).getTime();
+  return timeline
+    .filter((item) => item.classification === "alert")
+    .sort((a, b) => Math.abs(new Date(a.window_start).getTime() - eventTime) - Math.abs(new Date(b.window_start).getTime() - eventTime))[0];
+}
+
+function AlertPanel({ alerts, timeline, onAcknowledge, onResolve, busyAlertId }) {
   const activeAlerts = alerts.filter((alert) => alert.status !== "resolved");
   const displayAlerts = activeAlerts.length ? activeAlerts : alerts.slice(0, 5);
 
@@ -308,6 +358,7 @@ function AlertPanel({ alerts, onAcknowledge, onResolve, busyAlertId }) {
             <AlertItem
               key={alert.id}
               alert={alert}
+              windowItem={findAlertWindow(alert, timeline)}
               onAcknowledge={onAcknowledge}
               onResolve={onResolve}
               isBusy={busyAlertId === alert.id}
@@ -319,15 +370,18 @@ function AlertPanel({ alerts, onAcknowledge, onResolve, busyAlertId }) {
   );
 }
 
-function AlertItem({ alert, onAcknowledge, onResolve, isBusy }) {
+function AlertItem({ alert, windowItem, onAcknowledge, onResolve, isBusy }) {
   const riskScore = alert.decision?.risk_score;
   const canAcknowledge = alert.status === "open";
   const canResolve = alert.status === "acknowledged";
+  const explanation = alert.decision?.explanation || alert.message;
+  const indicators = indicatorLabels(explanation);
 
   return (
     <article className={`alert-item ${alert.status === "open" ? "alert-hot" : ""}`}>
       <div className="alert-topline">
-        <span className={`severity severity-${alert.severity}`}>{alert.severity}</span>
+        <span className={`severity severity-${alert.severity}`}>{statusLabel(alert.severity)}</span>
+        <span className={statusClass(alert.decision?.classification || "alert")}>{statusLabel(alert.decision?.classification || "alert")}</span>
         <span className={statusClass(alert.status)}>{statusLabel(alert.status)}</span>
       </div>
       <div className="alert-body">
@@ -343,6 +397,16 @@ function AlertItem({ alert, onAcknowledge, onResolve, isBusy }) {
       {alert.decision?.explanation && alert.decision.explanation !== alert.message ? (
         <p className="alert-explanation">{alert.decision.explanation}</p>
       ) : null}
+      <div className="alert-context">
+        <span><b>Merchant</b>{alert.merchant_id}</span>
+        <span><b>Window</b>{windowItem ? `${formatDateTime(windowItem.window_start)} - ${formatDateTime(windowItem.window_end)}` : "See timeline"}</span>
+      </div>
+      <div className="alert-indicators">
+        <span className="detail-label">Key indicators</span>
+        <div className="indicator-list compact-indicators">
+          {indicators.length ? indicators.map((indicator) => <span key={indicator}>{indicator}</span>) : <span>No additional indicators</span>}
+        </div>
+      </div>
       <div className="alert-footer">
         <time>{formatDateTime(alert.created_at)}</time>
         <div className="alert-actions">
@@ -358,14 +422,21 @@ function AlertItem({ alert, onAcknowledge, onResolve, isBusy }) {
   );
 }
 
-function MerchantPanel({ merchant }) {
+function MerchantPanel({ merchant, summary, timeline }) {
+  const latestWindow = timeline[timeline.length - 1];
+  const currentState = latestWindow?.classification || "normal";
   return (
     <section className="panel merchant-panel">
       <PanelHeader title="Merchant" eyebrow="Monitored account" />
       {!merchant ? (
         <EmptyState title="Merchant unavailable" message="The merchant endpoint did not return details." compact />
       ) : (
-        <dl className="merchant-list">
+        <>
+          <div className={`merchant-state ${riskTone(currentState)}`}>
+            <span>Current risk state</span>
+            <strong>{statusLabel(currentState)}</strong>
+          </div>
+          <dl className="merchant-list">
           <div>
             <dt>Name</dt>
             <dd>{merchant.name}</dd>
@@ -378,7 +449,14 @@ function MerchantPanel({ merchant }) {
             <dt>Merchant UUID</dt>
             <dd className="mono">{merchant.id}</dd>
           </div>
-        </dl>
+          </dl>
+          <div className="merchant-metrics">
+            <span><b>{formatNumber(summary?.total_transactions)}</b>Transactions</span>
+            <span><b>{formatNumber(summary?.total_windows)}</b>Windows</span>
+            <span><b>{formatPercent(latestWindow?.failure_rate)}</b>Latest failures</span>
+            <span><b>{formatNumber(summary?.average_risk_score, 1)}</b>Avg risk</span>
+          </div>
+        </>
       )}
     </section>
   );
@@ -551,11 +629,12 @@ function App() {
         </section>
         <AlertPanel
           alerts={data.alerts}
+          timeline={data.timeline}
           onAcknowledge={(alertId) => handleAlertAction(alertId, "acknowledge")}
           onResolve={(alertId) => handleAlertAction(alertId, "resolve")}
           busyAlertId={busyAlertId}
         />
-        <MerchantPanel merchant={data.merchant} />
+        <MerchantPanel merchant={data.merchant} summary={summary} timeline={data.timeline} />
         <RiskDistribution summary={summary} />
         <RecentActivity timeline={data.timeline} />
       </section>

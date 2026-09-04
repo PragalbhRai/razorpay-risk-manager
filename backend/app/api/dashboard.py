@@ -284,7 +284,25 @@ def dashboard_timeline(
 
 
 # =========================================================
-# Merchant overview
+# Authenticated merchant overview
+# =========================================================
+
+@router.get("/merchants/me")
+def current_merchant_dashboard(
+    db: Session = Depends(get_db),
+    merchant: MerchantModel = Depends(get_current_merchant),
+):
+    """Return dashboard information for the authenticated merchant."""
+
+    return merchant_dashboard(
+        merchant_id=str(merchant.id),
+        db=db,
+        merchant=merchant,
+    )
+
+
+# =========================================================
+# Merchant overview by ID (legacy-compatible)
 # =========================================================
 
 @router.get("/merchants/{merchant_id}")
