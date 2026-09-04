@@ -36,6 +36,9 @@ class RiskEngine:
         failure_rate = window["failure_rate"]
         distinct_methods = window["distinct_method_count"]
         amount_mean = window["amount_mean"]
+        failed_count = round(
+            failure_rate * tx_count
+        )
 
         # ---------------------------------------------------------
         # 1. Transaction volume
@@ -129,7 +132,15 @@ class RiskEngine:
 
         score = min(score, 100.0)
 
-        if score >= 70:
+        # Require enough absolute evidence before opening an alert. A high
+        # failure percentage in a very small window is too noisy to treat as
+        # confirmed fraud, while high-volume spikes still qualify directly.
+        alert_evidence = (
+            tx_count >= 10
+            or failed_count >= 5
+        )
+
+        if score >= 70 and alert_evidence:
             classification = "alert"
 
         elif score >= 40:

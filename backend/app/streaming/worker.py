@@ -418,7 +418,7 @@ def process_transaction(
                     decision.explanation
                 ),
                 model_version=(
-                    "rule-based-v1"
+                    "rule-based-v2"
                 ),
             )
 
@@ -444,7 +444,7 @@ def process_transaction(
             )
 
             db_decision.model_version = (
-                "rule-based-v1"
+                "rule-based-v2"
             )
 
             print(
