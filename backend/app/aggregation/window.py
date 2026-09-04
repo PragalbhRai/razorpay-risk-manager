@@ -1,178 +1,116 @@
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from statistics import mean, pstdev
 
 
 WINDOW_MINUTES = 5
 
+FAILED_STATUSES = {
+    "FAILED",
+    "FAILURE",
+    "DECLINED",
+    "CANCELLED",
+}
 
-class MerchantWindowAggregator:
+
+def normalize_datetime(value):
+    if isinstance(value, str):
+        value = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+
+    return value
+
+
+def get_window_start(timestamp):
     """
-    Maintains a rolling 5-minute transaction window per merchant.
+    Return the deterministic 5-minute bucket containing
+    the supplied timestamp.
 
-    Handles:
-    - timezone normalization
-    - duplicate transaction protection
-    - out-of-order transactions
-    - late-event detection
-    - rolling-window cleanup
+    Example:
+        14:03:21 -> 14:00:00
+        14:07:42 -> 14:05:00
     """
 
-    def __init__(self):
-        self.transactions = defaultdict(list)
-        self.transaction_ids = defaultdict(set)
-        self.max_seen_time = {}
+    timestamp = normalize_datetime(timestamp)
 
-    def add_transaction(self, data: dict) -> dict:
-        merchant_id = data["merchant_id"]
+    minute = (
+        timestamp.minute
+        - (timestamp.minute % WINDOW_MINUTES)
+    )
 
-        occurred_at = datetime.fromisoformat(
-            data["occurred_at"].replace("Z", "+00:00")
+    return timestamp.replace(
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
+def build_window(transactions, window_start):
+    """
+    Build deterministic 5-minute window statistics from
+    a collection of transaction records.
+    """
+
+    window_start = normalize_datetime(window_start)
+
+    window_end = (
+        window_start
+        + timedelta(minutes=WINDOW_MINUTES)
+    )
+
+    transactions = [
+        tx
+        for tx in transactions
+        if (
+            normalize_datetime(tx["occurred_at"])
+            >= window_start
+            and normalize_datetime(tx["occurred_at"])
+            < window_end
         )
+    ]
 
-        if occurred_at.tzinfo is None:
-            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
-
-        transaction_id = data["transaction_id"]
-
-        # ---------------------------------------------------------
-        # Duplicate protection
-        # ---------------------------------------------------------
-
-        if transaction_id in self.transaction_ids[merchant_id]:
-            current_time = self.max_seen_time.get(
-                merchant_id,
-                occurred_at,
-            )
-
-            return self._build_window(
-                merchant_id,
-                current_time,
-                late_event=False,
-            )
-
-        # ---------------------------------------------------------
-        # Determine the merchant watermark.
-        #
-        # max_seen_time represents the newest event timestamp
-        # observed for this merchant.
-        # ---------------------------------------------------------
-
-        previous_max = self.max_seen_time.get(
-            merchant_id
-        )
-
-        if previous_max is None or occurred_at > previous_max:
-            self.max_seen_time[merchant_id] = occurred_at
-
-        current_time = self.max_seen_time[merchant_id]
-
-        # ---------------------------------------------------------
-        # Late-event detection
-        #
-        # Anything older than the active 5-minute window relative
-        # to the newest observed event is considered late.
-        # ---------------------------------------------------------
-
-        window_start = current_time - timedelta(
-            minutes=WINDOW_MINUTES
-        )
-
-        late_event = occurred_at < window_start
-
-        transaction = {
-            "transaction_id": transaction_id,
-            "merchant_id": merchant_id,
-            "amount": float(data["amount"]),
-            "payment_method_type": data["payment_method_type"],
-            "status": data["status"],
-            "occurred_at": occurred_at,
-        }
-
-        # Record the transaction so duplicate deliveries are ignored.
-        self.transaction_ids[merchant_id].add(transaction_id)
-
-        # Late events are tracked but do not contaminate the active
-        # rolling window.
-        if not late_event:
-            self.transactions[merchant_id].append(transaction)
-
-        return self._build_window(
-            merchant_id,
-            current_time,
-            late_event=late_event,
-        )
-
-    def _build_window(
-        self,
-        merchant_id: str,
-        current_time: datetime,
-        late_event: bool = False,
-    ) -> dict:
-
-        window_start = current_time - timedelta(
-            minutes=WINDOW_MINUTES
-        )
-
-        transactions = [
-            tx
-            for tx in self.transactions[merchant_id]
-            if window_start <= tx["occurred_at"] <= current_time
-        ]
-
-        # Keep only transactions that belong to the active window.
-        self.transactions[merchant_id] = transactions
-
-        if not transactions:
-            return {
-                "merchant_id": merchant_id,
-                "window_start": window_start,
-                "window_end": current_time,
-                "tx_count": 0,
-                "distinct_method_count": 0,
-                "failure_rate": 0.0,
-                "amount_mean": 0.0,
-                "amount_stddev": 0.0,
-                "late_event_count": 1 if late_event else 0,
-            }
-
-        amounts = [
-            tx["amount"]
-            for tx in transactions
-        ]
-
-        failed_statuses = {
-            "FAILED",
-            "FAILURE",
-            "DECLINED",
-            "CANCELLED",
-        }
-
-        failed_count = sum(
-            1
-            for tx in transactions
-            if tx["status"].upper() in failed_statuses
-        )
-
-        failure_rate = failed_count / len(transactions)
-
+    if not transactions:
         return {
-            "merchant_id": merchant_id,
             "window_start": window_start,
-            "window_end": current_time,
-            "tx_count": len(transactions),
-            "distinct_method_count": len(
-                {
-                    tx["payment_method_type"]
-                    for tx in transactions
-                }
-            ),
-            "failure_rate": failure_rate,
-            "amount_mean": mean(amounts),
-            "amount_stddev": (
-                pstdev(amounts)
-                if len(amounts) > 1
-                else 0.0
-            ),
-            "late_event_count": 1 if late_event else 0,
+            "window_end": window_end,
+            "tx_count": 0,
+            "distinct_method_count": 0,
+            "failure_rate": 0.0,
+            "amount_mean": 0.0,
+            "amount_stddev": 0.0,
         }
+
+    amounts = [
+        float(tx["amount"])
+        for tx in transactions
+    ]
+
+    failed_count = sum(
+        1
+        for tx in transactions
+        if tx["status"].upper() in FAILED_STATUSES
+    )
+
+    tx_count = len(transactions)
+
+    return {
+        "window_start": window_start,
+        "window_end": window_end,
+        "tx_count": tx_count,
+        "distinct_method_count": len(
+            {
+                tx["payment_method_type"]
+                for tx in transactions
+            }
+        ),
+        "failure_rate": failed_count / tx_count,
+        "amount_mean": mean(amounts),
+        "amount_stddev": (
+            pstdev(amounts)
+            if len(amounts) > 1
+            else 0.0
+        ),
+    }
