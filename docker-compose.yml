@@ -1,20 +1,16 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15-alpine
     container_name: risk_postgres
     environment:
-      POSTGRES_USER: risk_user
-      POSTGRES_PASSWORD: risk_password
-      POSTGRES_DB: razorpay_risk_db
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-risk_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-risk_password}
+      POSTGRES_DB: ${POSTGRES_DB:-razorpay_risk_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/migrations:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U risk_user -d razorpay_risk_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-risk_user} -d ${POSTGRES_DB:-razorpay_risk_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -22,8 +18,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: risk_redis
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -36,13 +30,11 @@ services:
       dockerfile: Dockerfile
     container_name: risk_api
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    volumes:
-      - ./backend:/app
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://risk_user:risk_password@postgres:5432/razorpay_risk_db
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL:-postgresql://risk_user:risk_password@postgres:5432/razorpay_risk_db}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,11 +47,9 @@ services:
       dockerfile: Dockerfile
     container_name: risk_worker
     command: python -m app.streaming.worker
-    volumes:
-      - ./backend:/app
     environment:
-      - DATABASE_URL=postgresql://risk_user:risk_password@postgres:5432/razorpay_risk_db
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL:-postgresql://risk_user:risk_password@postgres:5432/razorpay_risk_db}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:
         condition: service_healthy
