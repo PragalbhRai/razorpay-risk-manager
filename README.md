@@ -199,8 +199,6 @@ Database migrations are mounted into PostgreSQL initialization. The additive API
 
 The application accepts generic PostgreSQL and Redis connection URLs through `DATABASE_URL` and `REDIS_URL`. Managed services such as Supabase PostgreSQL and Upstash Redis can be used through those variables; no provider-specific integration is required.
 
-The root `Dockerfile` is an optional single-container image that starts the API and worker together. The normal local path is `docker compose`, which uses the service-specific backend and frontend Dockerfiles.
-
 ## Provision a Merchant
 
 From the backend directory, create a merchant and receive its plaintext key once:
@@ -271,6 +269,25 @@ Set `SIMULATOR_API_KEY` before running it. The evaluator fails clearly if the ke
 cd backend
 python -m pip install -r requirements.txt
 python -m pytest -q
+```
+
+This runs the backend unit and API tests, including the focused worker retry/DLQ test in `backend/tests/test_worker.py`.
+
+Run the evaluator tests separately from the repository root:
+
+```powershell
+python -m pytest -q simulator/evaluation/test_evaluate.py
+```
+
+The benchmark runner is separate from the test suite. It sends deterministic scenarios through a running stack and reports aggregate, scenario-level, and seed-level metrics:
+
+```powershell
+python -m simulator.evaluation.benchmark `
+	--merchant-id <merchant-id> `
+	--api-key <merchant-api-key> `
+	--seed 42 `
+	--seed 43 `
+	--seed 44
 ```
 
 The test suite uses isolated unit fixtures and FastAPI `TestClient`; it does not require manually running PostgreSQL or Redis.
