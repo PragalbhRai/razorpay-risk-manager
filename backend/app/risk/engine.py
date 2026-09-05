@@ -40,71 +40,78 @@ class RiskEngine:
             failure_rate * tx_count
         )
 
-        # ---------------------------------------------------------
-        # 1. Transaction volume
-        # ---------------------------------------------------------
-
-        if tx_count >= 10:
-            score += 30
-            reasons.append("high transaction volume")
-        elif tx_count >= 5:
-            score += 15
-            reasons.append("elevated transaction volume")
-
-        # ---------------------------------------------------------
-        # 2. Baseline transaction-volume deviation
-        # ---------------------------------------------------------
-
         baseline_deviation_score = 0.0
 
+        # Relative signals are primary when a merchant baseline exists. The
+        # absolute fallback keeps first-window behavior useful before history
+        # has accumulated.
         if baseline_tx_count and baseline_tx_count > 0:
             volume_ratio = tx_count / baseline_tx_count
 
-            if volume_ratio >= 2.0:
-                score += 25
-                baseline_deviation_score = 1.0
-                reasons.append(
-                    "transaction volume is at least 2x the merchant baseline"
-                )
+            baseline_deviation_score = min(
+                max(volume_ratio - 1.0, 0.0),
+                1.0,
+            )
 
+            if volume_ratio >= 3.0:
+                score += 40
+                reasons.append(
+                    f"transaction volume is {volume_ratio:.1f}x the merchant baseline"
+                )
+            elif volume_ratio >= 2.0:
+                score += 30
+                reasons.append(
+                    f"transaction volume is {volume_ratio:.1f}x the merchant baseline"
+                )
             elif volume_ratio >= 1.5:
-                score += 15
-                baseline_deviation_score = 0.5
+                score += 20
                 reasons.append(
-                    "transaction volume is significantly above the merchant baseline"
+                    f"transaction volume is {volume_ratio:.1f}x the merchant baseline"
+                )
+            elif volume_ratio >= 1.25:
+                score += 10
+                reasons.append(
+                    f"transaction volume is {volume_ratio:.1f}x the merchant baseline"
                 )
 
-        # ---------------------------------------------------------
-        # 3. Failure rate
-        # ---------------------------------------------------------
-
-        if failure_rate >= 0.50:
-            score += 40
-            reasons.append("very high payment failure rate")
-
-        elif failure_rate >= 0.25:
-            score += 25
-            reasons.append("elevated payment failure rate")
-
-        # ---------------------------------------------------------
-        # 4. Baseline failure-rate deviation
-        # ---------------------------------------------------------
+        else:
+            if tx_count >= 10:
+                score += 30
+                reasons.append("high transaction volume")
+            elif tx_count >= 5:
+                score += 15
+                reasons.append("elevated transaction volume")
 
         if baseline_failure_rate is not None:
-
             failure_deviation = failure_rate - baseline_failure_rate
 
-            if failure_deviation >= 0.20:
+            if failure_deviation >= 0.35:
+                score += 45
+                reasons.append(
+                    f"payment failure rate is {failure_deviation:.0%} above the merchant baseline"
+                )
+            elif failure_deviation >= 0.20:
+                score += 35
+                reasons.append(
+                    f"payment failure rate is {failure_deviation:.0%} above the merchant baseline"
+                )
+            elif failure_deviation >= 0.10:
                 score += 25
                 reasons.append(
-                    "payment failure rate is significantly above the merchant baseline"
+                    f"payment failure rate is {failure_deviation:.0%} above the merchant baseline"
                 )
-
-            elif failure_deviation >= 0.10:
-                score += 15
+            elif failure_deviation >= 0.05:
+                score += 10
                 reasons.append(
-                    "payment failure rate is above the merchant baseline"
+                    f"payment failure rate is {failure_deviation:.0%} above the merchant baseline"
                 )
+        else:
+            if failure_rate >= 0.50:
+                score += 40
+                reasons.append("very high payment failure rate")
+            elif failure_rate >= 0.25:
+                score += 25
+                reasons.append("elevated payment failure rate")
 
         # ---------------------------------------------------------
         # 5. Payment-method diversity

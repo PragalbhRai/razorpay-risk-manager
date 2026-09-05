@@ -1,9 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.transactions import router as transactions_router
 from app.api.alerts import router as alerts_router
 from app.api.dashboard import router as dashboard_router
+from app.db.session import engine
+from app.streaming.redis_client import redis_client
 
 app = FastAPI(
     title="Razorpay Risk Manager",
@@ -28,4 +31,21 @@ app.include_router(dashboard_router)
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    checks = {
+        "database": "ok",
+        "redis": "ok",
+    }
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception:
+        checks["database"] = "unavailable"
+
+    try:
+        redis_client.ping()
+    except Exception:
+        checks["redis"] = "unavailable"
+
+    status = "ok" if all(value == "ok" for value in checks.values()) else "degraded"
+    return {"status": status, "checks": checks}

@@ -9,15 +9,6 @@ CREATE TABLE merchants (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE users (
-    id UUID PRIMARY KEY,
-    merchant_id UUID REFERENCES merchants(id),
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('merchant', 'analyst', 'admin')),
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-
 CREATE TABLE transactions (
     id UUID PRIMARY KEY,
     merchant_id UUID REFERENCES merchants(id),
@@ -36,7 +27,7 @@ CREATE TABLE windows (
     merchant_id UUID REFERENCES merchants(id),
     window_start TIMESTAMPTZ NOT NULL,
     window_end TIMESTAMPTZ NOT NULL,
-    finalized_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
     tx_count INT NOT NULL,
     distinct_method_count INT NOT NULL,
     failure_rate NUMERIC NOT NULL,
@@ -57,27 +48,21 @@ CREATE TABLE decisions (
     decided_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE feedback (
+CREATE TABLE alerts (
     id UUID PRIMARY KEY,
-    decision_id UUID REFERENCES decisions(id) UNIQUE,
-    reviewer_id UUID REFERENCES users(id),
-    verdict TEXT NOT NULL CHECK (verdict IN ('confirmed_fraud', 'false_positive', 'uncertain')),
-    notes TEXT,
-    reviewed_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE audit_log (
-    id UUID PRIMARY KEY,
-    entity_type TEXT NOT NULL,
-    entity_id UUID NOT NULL,
-    action TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    payload JSONB NOT NULL,
-    logged_at TIMESTAMPTZ DEFAULT now()
+    decision_id UUID NOT NULL UNIQUE REFERENCES decisions(id),
+    merchant_id UUID NOT NULL REFERENCES merchants(id),
+    severity TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    acknowledged_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ
 );
 
 -- Indexes aligned with our query patterns
 CREATE INDEX idx_transactions_merchant_occurred ON transactions(merchant_id, occurred_at);
 CREATE INDEX idx_windows_merchant_start ON windows(merchant_id, window_start);
 CREATE INDEX idx_decisions_classification ON decisions(classification);
-CREATE INDEX idx_audit_entity ON audit_log(entity_type, entity_id);
+CREATE INDEX idx_alerts_merchant_created ON alerts(merchant_id, created_at);

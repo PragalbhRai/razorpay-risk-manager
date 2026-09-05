@@ -47,8 +47,24 @@ def test_required_transaction_fields_are_rejected_when_missing():
     assert missing_fields == {"transaction_id", "amount"}
 
 
-def test_health_endpoint_returns_ok():
+def test_health_endpoint_reports_dependency_status(monkeypatch):
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, _query):
+            return None
+
+    monkeypatch.setattr("app.main.engine.connect", lambda: FakeConnection())
+    monkeypatch.setattr("app.main.redis_client.ping", lambda: True)
+
     response = TestClient(app).get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "checks": {"database": "ok", "redis": "ok"},
+    }

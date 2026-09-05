@@ -23,7 +23,13 @@ def normalize_window_start(value):
 
 
 def load_ground_truth(path):
+    windows, _ = load_ground_truth_details(path)
+    return windows
+
+
+def load_ground_truth_details(path):
     windows = {}
+    details = {}
     with path.open("r", encoding="utf-8") as ground_truth_file:
         for line_number, line in enumerate(ground_truth_file, start=1):
             if not line.strip():
@@ -36,6 +42,8 @@ def load_ground_truth(path):
                     ground_truth["window_start"]
                 )
                 is_fraud = ground_truth["is_fraud"]
+                scenario = ground_truth.get("scenario", "unknown")
+                seed = ground_truth.get("benchmark_seed")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ValueError(
                     f"Invalid ground-truth record at line {line_number}: {exc}"
@@ -48,12 +56,13 @@ def load_ground_truth(path):
 
             key = (merchant_id, window_start)
             windows[key] = windows.get(key, False) or is_fraud
+            details[key] = {"scenario": scenario, "seed": seed}
 
-    return windows
+    return windows, details
 
 
-def fetch_predictions(api_base_url, merchant_ids, limit, timeout):
-    api_key = os.getenv("SIMULATOR_API_KEY")
+def fetch_predictions(api_base_url, merchant_ids, limit, timeout, api_key=None):
+    api_key = api_key or os.getenv("SIMULATOR_API_KEY")
     if not api_key:
         raise ValueError(
             "SIMULATOR_API_KEY environment variable is required for evaluation"
@@ -117,27 +126,66 @@ def calculate_metrics(results):
     }
 
 
+def calculate_scenario_metrics(results):
+    grouped_results = defaultdict(list)
+    for result in results:
+        grouped_results[result.get("scenario", "unknown")].append(result)
+
+    return {
+        scenario: calculate_metrics(scenario_results)
+        for scenario, scenario_results in sorted(grouped_results.items())
+    }
+
+
+def calculate_run_metrics(results):
+    grouped_results = defaultdict(list)
+    for result in results:
+        key = (result.get("scenario", "unknown"), result.get("seed"))
+        grouped_results[key].append(result)
+
+    return {
+        f"{scenario}:seed={seed}": calculate_metrics(run_results)
+        for (scenario, seed), run_results in sorted(
+            grouped_results.items(),
+            key=lambda item: (item[0][0], str(item[0][1])),
+        )
+    }
+
+
 def safe_ratio(numerator, denominator):
     return numerator / denominator if denominator else 0.0
 
 
-def evaluate(ground_truth_path, api_base_url, limit, timeout):
-    ground_truth = load_ground_truth(ground_truth_path)
+def evaluate(ground_truth_path, api_base_url, limit, timeout, api_key=None):
+    ground_truth, details = load_ground_truth_details(ground_truth_path)
     merchant_ids = sorted({merchant_id for merchant_id, _ in ground_truth})
-    predictions = fetch_predictions(api_base_url, merchant_ids, limit, timeout)
+    predictions = fetch_predictions(
+        api_base_url,
+        merchant_ids,
+        limit,
+        timeout,
+        api_key=api_key,
+    )
 
     results = []
     unmatched = []
     for key, actual_fraud in sorted(ground_truth.items()):
         prediction = predictions.get(key)
         if prediction is None or prediction.get("classification") is None:
-            unmatched.append(
-                {
-                    "merchant_id": key[0],
-                    "window_start": key[1].isoformat(),
-                    "reason": "persisted window or decision not found",
-                }
-            )
+            unmatched.append({
+                "merchant_id": key[0],
+                "window_start": key[1].isoformat(),
+                "reason": "persisted window or decision not found",
+            })
+            results.append({
+                "merchant_id": key[0],
+                "window_start": key[1].isoformat(),
+                "actual_fraud": actual_fraud,
+                "classification": None,
+                "predicted_fraud": False,
+                "scenario": details.get(key, {}).get("scenario", "unknown"),
+                "seed": details.get(key, {}).get("seed"),
+            })
             continue
 
         classification = prediction["classification"].lower()
@@ -149,6 +197,15 @@ def evaluate(ground_truth_path, api_base_url, limit, timeout):
                     "reason": f"unsupported classification: {classification}",
                 }
             )
+            results.append({
+                "merchant_id": key[0],
+                "window_start": key[1].isoformat(),
+                "actual_fraud": actual_fraud,
+                "classification": None,
+                "predicted_fraud": False,
+                "scenario": details.get(key, {}).get("scenario", "unknown"),
+                "seed": details.get(key, {}).get("seed"),
+            })
             continue
 
         results.append(
@@ -158,6 +215,8 @@ def evaluate(ground_truth_path, api_base_url, limit, timeout):
                 "actual_fraud": actual_fraud,
                 "classification": classification,
                 "predicted_fraud": classification == "alert",
+                "scenario": details.get(key, {}).get("scenario", "unknown"),
+                "seed": details.get(key, {}).get("seed"),
             }
         )
 
@@ -165,6 +224,8 @@ def evaluate(ground_truth_path, api_base_url, limit, timeout):
     report["ground_truth_windows"] = len(ground_truth)
     report["unmatched_windows"] = unmatched
     report["unmatched_count"] = len(unmatched)
+    report["scenario_metrics"] = calculate_scenario_metrics(results)
+    report["run_metrics"] = calculate_run_metrics(results)
     return report
 
 
@@ -181,6 +242,20 @@ def print_report(report):
     print(f"F1: {report['f1']:.4f}")
     print(f"False Positive Rate: {report['false_positive_rate']:.4f}")
     print(f"Unmatched windows: {report['unmatched_count']}")
+    for scenario, metrics in report.get("scenario_metrics", {}).items():
+        print(
+            f"Scenario {scenario}: windows={metrics['windows_evaluated']} "
+            f"TP={metrics['tp']} TN={metrics['tn']} "
+            f"FP={metrics['fp']} FN={metrics['fn']} "
+            f"F1={metrics['f1']:.4f}"
+        )
+    for run, metrics in report.get("run_metrics", {}).items():
+        print(
+            f"Run {run}: windows={metrics['windows_evaluated']} "
+            f"TP={metrics['tp']} TN={metrics['tn']} "
+            f"FP={metrics['fp']} FN={metrics['fn']} "
+            f"F1={metrics['f1']:.4f}"
+        )
     if report["unmatched_windows"]:
         for item in report["unmatched_windows"]:
             print(

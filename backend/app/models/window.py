@@ -14,7 +14,7 @@ class WindowModel(Base):
 
     window_start = Column(DateTime(timezone=True), nullable=False)
     window_end = Column(DateTime(timezone=True), nullable=False)
-    finalized_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
 
     tx_count = Column(Integer, nullable=False)
     distinct_method_count = Column(Integer, nullable=False)

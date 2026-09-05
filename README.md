@@ -14,12 +14,13 @@ The project is designed to make sudden changes in transaction behavior visible: 
 - Redis Streams event transport
 - PostgreSQL persistence for merchants, transactions, windows, decisions, and alerts
 - Deterministic five-minute aggregation
-- Rule-based risk engine v2 with a low-sample alert guard
+- Deterministic statistical/rule-based risk engine with merchant baselines and a low-sample alert guard
 - Risk decision persistence and explanation text
 - Fraud alert lifecycle: `open` -> `acknowledged` -> `resolved`
 - React + Vite risk operations dashboard with auto-refresh
 - Seeded transaction simulator with local ground-truth labels
 - Evaluation harness for window-level TP/TN/FP/FN and classification metrics
+- Bounded worker retries with a `transactions-dlq` Redis Stream after three failed attempts
 
 ## Architecture
 
@@ -40,22 +41,22 @@ The API stores the transaction in PostgreSQL and publishes a stream event. The w
 
 ## Risk Engine
 
-The rule-based engine scores each merchant window using:
+The detector is deliberately not presented as machine learning. It is a deterministic, explainable statistical/rule engine that scores each merchant window using:
 
-- **Transaction volume:** 5 or more transactions adds an elevated-volume signal; 10 or more adds a high-volume signal.
-- **Baseline deviation:** volume at least 1.5x or 2x the historical merchant baseline adds deviation points.
-- **Payment failure rate:** rates of at least 25% or 50% add failure-rate points.
-- **Baseline failure deviation:** failure rate above the historical failure baseline adds further points.
+- **Transaction volume:** when history exists, graduated points are based on the current volume reaching 1.25x, 1.5x, 2x, or 3x the merchant baseline; absolute volume bands are used only without a baseline.
+- **Payment failure rate:** graduated points are based on the percentage-point increase over the merchant failure-rate baseline; absolute failure-rate bands are used only without a baseline.
 - **Payment-method diversity:** two or more methods and four or more methods add diversity points.
 - **Average transaction amount:** an average amount of at least INR 10,000 adds a large-amount signal.
 
-Scores are capped at 100:
+Scores are capped at 100. Alerts also require enough absolute evidence: at least 10 transactions or at least 5 failed transactions. A volume-only 3x spike can therefore remain `watch`; combined volume and failure-rate deviations can cross the alert threshold. This preserves protection against a single noisy metric while allowing accumulated anomalies to receive stronger scores.
+
+Scores are classified as:
 
 - `alert`: score at least 70 and sufficient alert evidence
 - `watch`: score at least 40 but below the alert condition
 - `normal`: score below 40
 
-Version 2 adds a low-sample alert guard. A score cannot become an `alert` unless the window has at least 10 transactions or at least 5 failed transactions. This reduces noisy alerts from very small windows while preserving obvious high-volume spikes.
+Every alert stores the decision explanation, so the signals that caused it remain visible through the alert API and dashboard.
 
 ## Authentication and Security
 
@@ -87,33 +88,67 @@ It reports:
 - Precision, recall, F1
 - False-positive rate
 - Unmatched windows
+- Scenario-level and seed-level metrics for benchmark runs
 
-## Current Results
+Missing predictions are counted as non-fraud predictions for confusion-matrix
+purposes, so a missing fraudulent window becomes a false negative. The
+unmatched count remains visible instead of silently excluding that window.
 
-Verified fraud-spike evaluation:
+## Benchmark Results
+
+Measured live Docker Compose benchmark using a fresh merchant, fixed UTC
+anchors, seeds `42`, `43`, and `44`, and all four scenarios. The benchmark sent
+879 transactions and evaluated 150 windows with zero unmatched windows.
 
 ```text
-Windows evaluated: 11
-TP: 1
-TN: 10
+Windows evaluated: 150
+TP: 13
+TN: 132
 FP: 0
-FN: 0
+FN: 5
 
 Precision: 1.0000
-Recall: 1.0000
-F1: 1.0000
+Recall: 0.7222
+F1: 0.8387
 False Positive Rate: 0.0000
 Unmatched windows: 0
 ```
 
-Broader v2 benchmark findings across the tested seeds:
+Scenario aggregates from the same run:
 
-- **normal:** zero false positives
-- **fraud_spike:** perfect detection
-- **recovery:** perfect detection
-- **gradual_fraud:** conservative detection with some false negatives and zero false positives
+| Scenario | Windows | TP | TN | FP | FN | Precision | Recall | F1 | FPR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| normal | 30 | 0 | 30 | 0 | 0 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| fraud_spike | 33 | 3 | 30 | 0 | 0 | 1.0000 | 1.0000 | 1.0000 | 0.0000 |
+| gradual_fraud | 42 | 7 | 30 | 0 | 5 | 1.0000 | 0.5833 | 0.7368 | 0.0000 |
+| recovery | 45 | 3 | 42 | 0 | 0 | 1.0000 | 1.0000 | 1.0000 | 0.0000 |
 
-The gradual-fraud result is expected from the current low-sample alert guard: early, lower-volume fraud stages may remain `watch` rather than opening an alert.
+The scenario meanings are: `normal` is the negative control, `fraud_spike`
+is abrupt high-volume/high-failure fraud, `gradual_fraud` introduces fraud in
+stages, and `recovery` contains one fraud spike followed by normal traffic.
+
+Run the benchmark with a newly provisioned merchant so the historical state is
+isolated:
+
+```powershell
+python -m simulator.evaluation.benchmark `
+	--merchant-id <merchant-id> `
+	--api-key <merchant-api-key> `
+	--seed 42 `
+	--seed 43 `
+	--seed 44 `
+	--output $env:TEMP\risk-benchmark-ground-truth.jsonl `
+	--json-output $env:TEMP\risk-benchmark-report.json
+```
+
+The benchmark uses fixed anchors and waits for all expected windows to be
+persisted before evaluation. Ground-truth labels remain only in the JSONL
+output and are removed from every transaction API payload.
+
+These are measured benchmark results, not production guarantees. The main
+remaining weakness is gradual-fraud recall: the low-sample alert guard and
+staged signal buildup intentionally leave some early fraud windows as
+`watch` rather than `alert`.
 
 ## Repository Structure
 
@@ -160,7 +195,11 @@ Services:
 - PostgreSQL: `localhost:5432`
 - Redis: `localhost:6379`
 
-Database migrations are mounted into PostgreSQL initialization. The additive API-key migration is `database/migrations/02_add_merchant_api_key_hash.sql`.
+Database migrations are mounted into PostgreSQL initialization. The additive API-key migration is `database/migrations/02_add_merchant_api_key_hash.sql`; `03_alerts_and_schema_cleanup.sql` adds the alert table, removes unused legacy tables, and renames the window recomputation timestamp. Existing Docker volumes need additive migrations applied once manually because PostgreSQL only runs init scripts for a new volume.
+
+The application accepts generic PostgreSQL and Redis connection URLs through `DATABASE_URL` and `REDIS_URL`. Managed services such as Supabase PostgreSQL and Upstash Redis can be used through those variables; no provider-specific integration is required.
+
+The root `Dockerfile` is an optional single-container image that starts the API and worker together. The normal local path is `docker compose`, which uses the service-specific backend and frontend Dockerfiles.
 
 ## Provision a Merchant
 
@@ -242,7 +281,7 @@ All routes below require `X-API-Key` unless noted otherwise.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Service health check; returns `{"status":"ok"}` |
+| `GET` | `/health` | Dependency health check for PostgreSQL and Redis |
 | `POST` | `/api/v1/transactions` | Ingest a transaction and publish it to Redis Streams |
 | `GET` | `/api/v1/dashboard/summary` | Authenticated merchant summary |
 | `GET` | `/api/v1/dashboard/timeline` | Authenticated merchant risk windows |
@@ -266,10 +305,11 @@ The dashboard exposes the current status and calls the acknowledge/resolve endpo
 ## Limitations and Current Status
 
 - The system is a focused fraud-spike detector, not a general fraud decisioning platform.
-- The risk engine is deterministic and rule-based; it is not an ML model.
+- The risk engine is deterministic and rule/statistical based; it is not an ML model.
 - Gradual fraud can produce false negatives while signals accumulate.
-- The current deployment is a Docker Compose development/demo stack.
-- Worker idempotency, richer audit workflows, and broader automated integration coverage remain future work.
+- The current deployment is a Docker Compose development/demo stack, not a production deployment.
+- Broader multi-seed and multi-scenario benchmarking remains future work; the checked-in result above is one reproducible live run.
+- Stronger key rotation, distributed rate limiting, richer audit workflows, and high-availability data services remain production improvements.
 - The dashboard currently monitors the authenticated merchant configured for its API key.
 
 ## Future Scaling Direction

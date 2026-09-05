@@ -31,3 +31,4 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+simulator/output/*.jsonl

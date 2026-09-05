@@ -1,7 +1,7 @@
 import os
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import redis
 
@@ -25,8 +25,10 @@ REDIS_URL = os.getenv(
 )
 
 STREAM_NAME = "transactions"
+DLQ_STREAM_NAME = "transactions-dlq"
 CONSUMER_GROUP = "risk-workers"
 CONSUMER_NAME = "risk-worker-1"
+MAX_RETRY_ATTEMPTS = 3
 
 BASELINE_WINDOW_COUNT = 20
 
@@ -37,6 +39,41 @@ redis_client = redis.Redis.from_url(
 )
 
 risk_engine = RiskEngine()
+
+
+def process_stream_message(message_id, data):
+    """Process a message with bounded retries and route failures to a DLQ."""
+    transaction_id = data.get("transaction_id")
+    retry_key = f"{STREAM_NAME}:retries:{message_id}"
+
+    for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
+        try:
+            process_transaction(transaction_id, data)
+            redis_client.xack(STREAM_NAME, CONSUMER_GROUP, message_id)
+            redis_client.delete(retry_key)
+            return True
+        except Exception as exc:
+            redis_client.set(retry_key, attempt)
+            if attempt == MAX_RETRY_ATTEMPTS:
+                redis_client.xadd(
+                    DLQ_STREAM_NAME,
+                    {
+                        **data,
+                        "original_message_id": message_id,
+                        "retry_attempts": str(attempt),
+                        "error": str(exc)[:500],
+                    },
+                )
+                redis_client.xack(STREAM_NAME, CONSUMER_GROUP, message_id)
+                redis_client.delete(retry_key)
+                print(
+                    f"Moved failed message to {DLQ_STREAM_NAME}: "
+                    f"{message_id} ({exc})",
+                    flush=True,
+                )
+                return False
+
+    return False
 
 
 def ensure_consumer_group():
@@ -317,9 +354,7 @@ def process_transaction(
                 window_end=(
                     window["window_end"]
                 ),
-                finalized_at=(
-                    window["window_end"]
-                ),
+                updated_at=datetime.now(timezone.utc),
                 tx_count=(
                     window["tx_count"]
                 ),
@@ -354,9 +389,7 @@ def process_transaction(
                 window["window_end"]
             )
 
-            db_window.finalized_at = (
-                window["window_end"]
-            )
+            db_window.updated_at = datetime.now(timezone.utc)
 
             db_window.tx_count = (
                 window["tx_count"]
@@ -567,34 +600,9 @@ def recover_pending_messages():
 
                 processed_any = True
 
-                transaction_id = data.get(
-                    "transaction_id"
-                )
-
-                try:
-
-                    process_transaction(
-                        transaction_id,
-                        data,
-                    )
-
-                    redis_client.xack(
-                        STREAM_NAME,
-                        CONSUMER_GROUP,
-                        message_id,
-                    )
-
+                if process_stream_message(message_id, data):
                     print(
-                        f"Recovered and acknowledged: "
-                        f"{message_id}",
-                        flush=True,
-                    )
-
-                except Exception as exc:
-
-                    print(
-                        f"Error recovering "
-                        f"{message_id}: {exc}",
+                        f"Recovered and acknowledged: {message_id}",
                         flush=True,
                     )
 
@@ -670,34 +678,9 @@ def main():
 
                 for message_id, data in entries:
 
-                    transaction_id = data.get(
-                        "transaction_id"
-                    )
-
-                    try:
-
-                        process_transaction(
-                            transaction_id,
-                            data,
-                        )
-
-                        redis_client.xack(
-                            STREAM_NAME,
-                            CONSUMER_GROUP,
-                            message_id,
-                        )
-
+                    if process_stream_message(message_id, data):
                         print(
-                            f"Transaction acknowledged: "
-                            f"{message_id}",
-                            flush=True,
-                        )
-
-                    except Exception as exc:
-
-                        print(
-                            f"Error processing "
-                            f"{message_id}: {exc}",
+                            f"Transaction acknowledged: {message_id}",
                             flush=True,
                         )
 
